@@ -93,7 +93,7 @@ pub async fn cmd_build(
     }
 
     info_print!(verb, "  {} graph...", "Building".cyan());
-    let mut graph = graphify_build::build(&extractions).context("Failed to build graph")?;
+    let mut graph = graphify_build::build_owned(extractions).context("Failed to build graph")?;
     info_print!(
         verb,
         "  Graph: {} nodes, {} edges",

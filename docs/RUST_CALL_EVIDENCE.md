@@ -41,3 +41,8 @@ version and ancestor Cargo manifests, and the build output records its successfu
 extractor and package-context fingerprint. Copying,
 renaming or upgrading the extractor therefore cannot silently reuse old source
 identities or an older graph schema.
+
+The CLI moves assembled extraction payloads into the graph instead of holding
+multiple complete clones of the corpus. This retains all nodes, parallel call
+sites and metadata while bounding graph-assembly memory by the input payload
+and graph indexes rather than repeated copies of their JSON metadata.
