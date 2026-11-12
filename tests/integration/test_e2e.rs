@@ -126,7 +126,7 @@ pub fn default_config() -> Config {
     assert!(json.get("nodes").unwrap().as_array().unwrap().len() >= 4);
     assert!(json.get("links").unwrap().as_array().unwrap().len() >= 2);
     assert!(!json.get("directed").unwrap().as_bool().unwrap());
-    assert!(!json.get("multigraph").unwrap().as_bool().unwrap());
+    assert!(json.get("multigraph").unwrap().as_bool().unwrap());
 }
 
 #[test]
@@ -938,4 +938,72 @@ int main() {
         "should extract print_point: {:?}",
         labels
     );
+}
+
+#[test]
+fn cli_resolves_rust_cross_file_calls_after_cache_assembly_and_extractor_upgrade() {
+    use std::process::Command;
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let output = directory.path().join("generated");
+    std::fs::create_dir_all(source.join("src")).unwrap();
+    std::fs::write(
+        source.join("Cargo.toml"),
+        "[package]\nname='cache_fixture'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("src/lib.rs"),
+        "mod worker; use crate::worker::perform as run; fn caller() { run(); }\n",
+    )
+    .unwrap();
+    std::fs::write(source.join("src/worker.rs"), "pub fn perform() {}\n").unwrap();
+    let run = |package: &str| {
+        let result = Command::new(env!("CARGO_BIN_EXE_graphify-rs"))
+            .arg("build")
+            .arg("--path")
+            .arg(&source)
+            .arg("--output")
+            .arg(&output)
+            .args(["--no-llm", "--code-only", "--format", "json,report"])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let graph: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(output.join("graph.json")).unwrap()).unwrap();
+        let target = graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["qualified_name"] == format!("{package}::worker::perform"))
+            .unwrap();
+        assert!(
+            graph["links"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|edge| edge["relation"] == "calls"
+                    && edge["target"] == target["id"]
+                    && edge["source_location"] == "L1")
+        );
+        assert_eq!(graph["multigraph"], true);
+    };
+    run("cache_fixture");
+    // Simulate generated graph/cache left by an older extractor while source
+    // bytes stay unchanged; a version stamp must force project assembly again.
+    std::fs::write(output.join("extractor-version"), "old-extractor").unwrap();
+    std::fs::write(output.join("graph.json"), "{\"sentinel\":true}").unwrap();
+    run("cache_fixture");
+    run("cache_fixture");
+    // Cargo context changes while Rust files remain byte-for-byte identical.
+    std::fs::write(
+        source.join("Cargo.toml"),
+        "[package]\nname='renamed_fixture'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+    run("renamed_fixture");
 }

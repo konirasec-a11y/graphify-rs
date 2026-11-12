@@ -2,7 +2,7 @@
 //!
 //! Implements a two-pass extraction pipeline ported from the Python `extract.py`:
 //!
-//! - **Pass 1** (deterministic): regex-based AST extraction of functions, classes,
+//! - **Pass 1** (deterministic): syntax-based AST extraction of functions, classes,
 //!   imports, and call relationships from source code.
 //! - **Pass 2** (semantic): Claude API–based extraction of higher-level concepts
 //!   from documents, papers, and images.
@@ -11,6 +11,7 @@ pub mod ast_extract;
 pub mod dedup;
 pub mod lang_config;
 pub mod parser;
+pub mod rust_syntax;
 pub mod semantic;
 pub mod treesitter;
 
@@ -114,8 +115,8 @@ fn collect_files_inner(dir: &Path, map: &HashMap<&str, &str>, out: &mut Vec<Path
 
 /// Run Pass 1 extraction on a set of file paths.
 ///
-/// Dispatches each file to the appropriate regex-based extractor, collects all
-/// nodes and edges, deduplicates, and runs cross-file import resolution for Python.
+/// Dispatches files to syntax parsers (with legacy regex fallbacks), collects
+/// nodes and edges, deduplicates, and resolves supported project relations.
 ///
 /// Files are processed in parallel using rayon for improved throughput on
 /// multi-core machines.
@@ -149,7 +150,7 @@ pub fn extract(paths: &[PathBuf]) -> ExtractionResult {
             };
 
             let mut result = if let Some(ts_result) = treesitter::try_extract(path, &source, lang) {
-                debug!("used tree-sitter for {} ({})", path.display(), lang);
+                debug!("used syntax parser for {} ({})", path.display(), lang);
                 ts_result
             } else {
                 let source_str = String::from_utf8_lossy(&source);
@@ -173,6 +174,7 @@ pub fn extract(paths: &[PathBuf]) -> ExtractionResult {
     resolve_cross_file_imports(&mut combined);
 
     resolve_cross_file_calls(&mut combined);
+    rust_syntax::resolve_project(&mut combined);
 
     info!(
         "extraction complete: {} nodes, {} edges",
@@ -181,6 +183,13 @@ pub fn extract(paths: &[PathBuf]) -> ExtractionResult {
     );
 
     combined
+}
+
+fn rust_edge(edge: &GraphEdge) -> bool {
+    edge.extra
+        .get("language")
+        .and_then(serde_json::Value::as_str)
+        == Some("rust")
 }
 
 /// Resolve Python `import` / `from ... import` edges to actual module/function
@@ -229,7 +238,7 @@ fn resolve_python_imports(result: &mut ExtractionResult) {
     let mut star_expansions: Vec<GraphEdge> = Vec::new();
 
     for edge in &mut result.edges {
-        if edge.relation == "imports" {
+        if edge.relation == "imports" && !rust_edge(edge) {
             let import_label = id_to_label.get(edge.target.as_str()).copied().unwrap_or("");
 
             if import_label.contains('*') {
@@ -353,7 +362,7 @@ fn resolve_cross_file_imports(result: &mut ExtractionResult) {
     let mut seen = HashSet::new();
 
     for edge in &result.edges {
-        if edge.relation != "imports" {
+        if edge.relation != "imports" || rust_edge(edge) {
             continue;
         }
 
@@ -557,7 +566,7 @@ fn resolve_cross_file_calls(result: &mut ExtractionResult) {
     let uses_edges: Vec<(String, String, String)> = result
         .edges
         .iter()
-        .filter(|e| e.relation == "uses" && callable_ids.contains(&e.source))
+        .filter(|e| e.relation == "uses" && !rust_edge(e) && callable_ids.contains(&e.source))
         .map(|e| (e.source.clone(), e.target.clone(), e.source_file.clone()))
         .collect();
 

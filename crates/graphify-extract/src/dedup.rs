@@ -15,10 +15,22 @@ pub fn dedup_file(result: &mut ExtractionResult) {
     let mut seen_nodes = HashSet::new();
     result.nodes.retain(|n| seen_nodes.insert(n.id.clone()));
 
-    let mut seen_edges: HashSet<(String, String, String)> = HashSet::new();
-    result
-        .edges
-        .retain(|e| seen_edges.insert((e.source.clone(), e.target.clone(), e.relation.clone())));
+    let mut seen_edges = HashSet::new();
+    result.edges.retain(|e| {
+        let site = if e.extra.get("language").and_then(serde_json::Value::as_str) == Some("rust")
+            && e.relation == "calls"
+        {
+            (
+                e.source_location.clone(),
+                e.extra
+                    .get("source_column")
+                    .and_then(serde_json::Value::as_u64),
+            )
+        } else {
+            (None, None)
+        };
+        seen_edges.insert((e.source.clone(), e.target.clone(), e.relation.clone(), site))
+    });
 }
 
 /// Merge multiple [`ExtractionResult`]s into one, deduplicating across all of them.

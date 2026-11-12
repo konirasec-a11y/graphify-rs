@@ -7,6 +7,11 @@ repository.workspace = true
 description = "AST and semantic extraction engine for graphify"
 
 [dependencies]
+sha2.workspace = true
+syn = { version = "2", features = ["full", "visit"] }
+quote = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
+toml = "0.8"
 graphify-core.workspace = true
 graphify-cache.workspace = true
 graphify-security.workspace = true

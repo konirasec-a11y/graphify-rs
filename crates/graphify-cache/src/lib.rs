@@ -1,10 +1,10 @@
 //! SHA256-based semantic caching for graphify.
 //!
-//! Caches extraction results keyed by content hash so unchanged files are not
-//! re-processed.
+//! Caches extraction results keyed by version, source identity, content and package
+//! context so unchanged files retain correct source ownership.
 
-use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::{collections::BTreeSet, fs};
 
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -38,13 +38,64 @@ pub fn content_hash(data: &[u8]) -> String {
     format!("{hash:x}")
 }
 
-/// Build a cache filename from a file path relative to `root`.
+/// Fingerprint package context that affects Rust namespace extraction.
 ///
-/// The key is `{sha256}.json` where the hash is computed over the file content,
-/// so any change in content naturally invalidates the cache entry.
-fn cache_key(path: &Path, _root: &Path) -> String {
-    let hash = file_hash(path).unwrap_or_default();
-    format!("{hash}.json")
+/// Manifests are not necessarily classified as code by the detector. Including
+/// this fingerprint in a build stamp prevents a manifest-only rename from
+/// certifying an unchanged but incorrectly scoped generated graph.
+pub fn namespace_fingerprint(paths: &[PathBuf], root: &Path) -> String {
+    let manifests: BTreeSet<_> = paths
+        .iter()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .flat_map(|path| {
+            let identity = path.canonicalize().unwrap_or_else(|_| root.join(path));
+            identity
+                .ancestors()
+                .skip(1)
+                .map(|directory| directory.join("Cargo.toml"))
+                .filter(|manifest| manifest.is_file())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let context = manifests
+        .iter()
+        .map(|path| format!("{}:{}", path.display(), file_hash(path).unwrap_or_default()))
+        .collect::<Vec<_>>()
+        .join("|");
+    content_hash(context.as_bytes())
+}
+
+/// Versioned, path-sensitive extraction cache identity.
+///
+/// Extraction results contain source IDs and locations. Equal source bytes in
+/// two files are not interchangeable; upgrades must not reuse old schemas.
+fn cache_key(path: &Path, root: &Path) -> Option<String> {
+    let identity = path.canonicalize().unwrap_or_else(|_| root.join(path));
+    let content = file_hash(path)?;
+    // Rust namespace extraction depends on package/lib names and dependency
+    // aliases. A manifest-only change must invalidate unchanged Rust files too.
+    let manifests = if path.extension().is_some_and(|extension| extension == "rs") {
+        identity
+            .ancestors()
+            .skip(1)
+            .filter_map(|directory| {
+                let path = directory.join("Cargo.toml");
+                file_hash(&path).map(|hash| format!("{}:{hash}", path.display()))
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    } else {
+        String::new()
+    };
+    let context = format!(
+        "{}\0{}\0{}\0{}\0{}",
+        env!("CARGO_PKG_VERSION"),
+        identity.display(),
+        path.display(),
+        content,
+        manifests
+    );
+    Some(format!("{}.json", content_hash(context.as_bytes())))
 }
 
 /// Load a cached extraction result for `path`, returning `None` on cache miss.
@@ -63,7 +114,7 @@ pub fn load_cached_from<T: DeserializeOwned>(
     root: &Path,
     cache_dir: &Path,
 ) -> Option<T> {
-    let key = cache_key(path, root);
+    let key = cache_key(path, root)?;
     let cache_path = cache_dir.join(&key);
     if !cache_path.exists() {
         debug!(?cache_path, "cache miss");
@@ -87,7 +138,9 @@ pub fn save_cached_to<T: Serialize>(
     root: &Path,
     cache_dir: &Path,
 ) -> bool {
-    let key = cache_key(path, root);
+    let Some(key) = cache_key(path, root) else {
+        return false;
+    };
     let cache_path = cache_dir.join(&key);
 
     if let Some(parent) = cache_path.parent()
@@ -134,7 +187,9 @@ pub fn clear_cache_dir(cache_dir: &Path) -> std::io::Result<()> {
 /// the *current* content hash so stale data is cleaned up eagerly. It is a
 /// no-op when the file can't be read (already deleted, etc.).
 pub fn invalidate_cached(path: &Path, root: &Path, cache_dir: &Path) -> bool {
-    let key = cache_key(path, root);
+    let Some(key) = cache_key(path, root) else {
+        return true;
+    };
     let cache_path = cache_dir.join(&key);
     if cache_path.exists() {
         debug!(?cache_path, "cache invalidate");
@@ -247,5 +302,69 @@ mod tests {
 
         clear_cache_dir(&cache_dir).unwrap();
         assert!(!cache_dir.exists());
+    }
+
+    #[test]
+    fn identical_bytes_in_distinct_paths_never_share_source_identity() {
+        let directory = TempDir::new().unwrap();
+        let first = directory.path().join("first.rs");
+        let second = directory.path().join("second.rs");
+        fs::write(&first, "fn same() {}").unwrap();
+        fs::write(&second, "fn same() {}").unwrap();
+        let cache = directory.path().join("cache");
+        assert!(save_cached_to(
+            &first,
+            &make_dummy(),
+            directory.path(),
+            &cache
+        ));
+        let missing: Option<DummyResult> = load_cached_from(&second, directory.path(), &cache);
+        assert!(
+            missing.is_none(),
+            "equal bytes do not imply equal source IDs"
+        );
+        assert_ne!(
+            cache_key(&first, directory.path()),
+            cache_key(&second, directory.path())
+        );
+    }
+
+    #[test]
+    fn old_content_only_cache_entries_are_not_accepted_as_current_extraction() {
+        let directory = TempDir::new().unwrap();
+        let source = directory.path().join("source.rs");
+        fs::write(&source, "fn unchanged() {}").unwrap();
+        let cache = directory.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        let old_key = format!("{}.json", file_hash(&source).unwrap());
+        fs::write(
+            cache.join(old_key),
+            serde_json::to_string(&make_dummy()).unwrap(),
+        )
+        .unwrap();
+        let missing: Option<DummyResult> = load_cached_from(&source, directory.path(), &cache);
+        assert!(
+            missing.is_none(),
+            "an extractor upgrade must not certify legacy evidence"
+        );
+    }
+
+    #[test]
+    fn cargo_namespace_changes_invalidate_unchanged_rust_sources() {
+        let directory = TempDir::new().unwrap();
+        let source = directory.path().join("source.rs");
+        let manifest = directory.path().join("Cargo.toml");
+        fs::write(&source, "fn unchanged() {}").unwrap();
+        fs::write(&manifest, "[package]\nname = 'old'\n").unwrap();
+        let cache = directory.path().join("cache");
+        assert!(save_cached_to(
+            &source,
+            &make_dummy(),
+            directory.path(),
+            &cache
+        ));
+        fs::write(&manifest, "[package]\nname = 'new'\n").unwrap();
+        let missing: Option<DummyResult> = load_cached_from(&source, directory.path(), &cache);
+        assert!(missing.is_none());
     }
 }
