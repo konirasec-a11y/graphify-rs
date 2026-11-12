@@ -221,7 +221,7 @@ impl KnowledgeGraph {
 
         json!({
             "directed": false,
-            "multigraph": false,
+            "multigraph": true,
             "graph": {},
             "nodes": nodes,
             "links": links,
@@ -243,7 +243,7 @@ impl KnowledgeGraph {
         let mut map = serde::Serializer::serialize_map(&mut ser, Some(5))?;
 
         map.serialize_entry("directed", &false)?;
-        map.serialize_entry("multigraph", &false)?;
+        map.serialize_entry("multigraph", &true)?;
         map.serialize_entry("graph", &serde_json::Map::new())?;
 
         let nodes: Vec<&GraphNode> = self
@@ -394,7 +394,7 @@ mod tests {
 
         let json = kg.to_node_link_json();
         assert_eq!(json["directed"], false);
-        assert_eq!(json["multigraph"], false);
+        assert_eq!(json["multigraph"], true);
         assert!(json["nodes"].as_array().unwrap().len() == 2);
         assert!(json["links"].as_array().unwrap().len() == 1);
 

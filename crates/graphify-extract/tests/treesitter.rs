@@ -789,7 +789,13 @@ fn caller() {
     let call_edges: Vec<_> = result
         .edges
         .iter()
-        .filter(|e| e.relation == "calls")
+        .filter(|e| {
+            e.relation == "calls"
+                && e.extra
+                    .get("resolution")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("lexical")
+        })
         .collect();
     assert_eq!(
         call_edges.len(),
@@ -797,7 +803,25 @@ fn caller() {
         "should have exactly 1 call edge (caller->target), got {:?}",
         call_edges
     );
-    assert_eq!(call_edges[0].target, make_id(&["test.rs", "target"]));
+    let target = result
+        .nodes
+        .iter()
+        .find(|node| {
+            node.label == "target()"
+                && node
+                    .extra
+                    .get("item_kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("function")
+        })
+        .unwrap();
+    assert_eq!(call_edges[0].target, target.id);
+    assert!(result.edges.iter().any(|edge| {
+        edge.extra
+            .get("resolution")
+            .and_then(serde_json::Value::as_str)
+            == Some("method-unresolved")
+    }));
 }
 
 #[test]
@@ -867,7 +891,7 @@ public class App {
 }
 
 #[test]
-fn ts_call_graph_no_self_call() {
+fn ts_call_graph_retains_real_recursion() {
     let source = br#"
 fn recursive(x: i32) {
     if x > 0 {
@@ -881,7 +905,12 @@ fn recursive(x: i32) {
         .iter()
         .filter(|e| e.relation == "calls")
         .collect();
-    assert!(call_edges.is_empty(), "self-calls should be filtered out");
+    assert_eq!(
+        call_edges.len(),
+        1,
+        "real recursive call sites must remain observable"
+    );
+    assert_eq!(call_edges[0].source, call_edges[0].target);
 }
 
 #[test]

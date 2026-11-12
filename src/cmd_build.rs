@@ -37,7 +37,22 @@ pub async fn cmd_build(
 
     let (detection, changed) = step_detect(&root, &output_dir, verb)?;
 
-    if !changed {
+    let extractor_stamp = output_dir.join("extractor-version");
+    let code_paths: Vec<_> = detection
+        .files
+        .get(&graphify_detect::FileType::Code)
+        .into_iter()
+        .flatten()
+        .map(|path| root.join(path))
+        .collect();
+    let extractor_context = format!(
+        "{}\n{}",
+        env!("CARGO_PKG_VERSION"),
+        graphify_cache::namespace_fingerprint(&code_paths, &root)
+    );
+    let extractor_current =
+        std::fs::read_to_string(&extractor_stamp).is_ok_and(|version| version == extractor_context);
+    if !changed && extractor_current {
         let all_outputs_present = selected.iter().all(|fmt| {
             let p = match *fmt {
                 "json" => output_dir.join("graph.json"),
@@ -78,7 +93,7 @@ pub async fn cmd_build(
     }
 
     info_print!(verb, "  {} graph...", "Building".cyan());
-    let mut graph = graphify_build::build(&extractions).context("Failed to build graph")?;
+    let mut graph = graphify_build::build_owned(extractions).context("Failed to build graph")?;
     info_print!(
         verb,
         "  Graph: {} nodes, {} edges",
@@ -130,6 +145,8 @@ pub async fn cmd_build(
         output_dir.display()
     );
 
+    std::fs::write(&extractor_stamp, extractor_context)
+        .context("cannot record successful extractor version")?;
     Ok(())
 }
 
@@ -272,6 +289,10 @@ fn step_extract_ast(
         ast_result.edges.extend(partial.edges);
         ast_result.hyperedges.extend(partial.hyperedges);
     }
+
+    // Per-file caches cannot resolve imports into files not yet present. Run the
+    // Rust project pass once after assembly, including when all files were cached.
+    graphify_extract::rust_syntax::resolve_project(&mut ast_result);
 
     if let Some(pb) = pb {
         pb.finish_and_clear();

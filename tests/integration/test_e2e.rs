@@ -126,7 +126,7 @@ pub fn default_config() -> Config {
     assert!(json.get("nodes").unwrap().as_array().unwrap().len() >= 4);
     assert!(json.get("links").unwrap().as_array().unwrap().len() >= 2);
     assert!(!json.get("directed").unwrap().as_bool().unwrap());
-    assert!(!json.get("multigraph").unwrap().as_bool().unwrap());
+    assert!(json.get("multigraph").unwrap().as_bool().unwrap());
 }
 
 #[test]
@@ -938,4 +938,218 @@ int main() {
         "should extract print_point: {:?}",
         labels
     );
+}
+
+#[test]
+fn cli_resolves_rust_cross_file_calls_after_cache_assembly_and_extractor_upgrade() {
+    use std::process::Command;
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let output = directory.path().join("generated");
+    std::fs::create_dir_all(source.join("src")).unwrap();
+    std::fs::write(
+        source.join("Cargo.toml"),
+        "[package]\nname='cache_fixture'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("src/lib.rs"),
+        "mod worker; use crate::worker::perform as run; fn caller() { run(); }\n",
+    )
+    .unwrap();
+    std::fs::write(source.join("src/worker.rs"), "pub fn perform() {}\n").unwrap();
+    let run = |package: &str| {
+        let result = Command::new(env!("CARGO_BIN_EXE_graphify-rs"))
+            .arg("build")
+            .arg("--path")
+            .arg(&source)
+            .arg("--output")
+            .arg(&output)
+            .args(["--no-llm", "--code-only", "--format", "json,report"])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let graph: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(output.join("graph.json")).unwrap()).unwrap();
+        let target = graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["qualified_name"] == format!("{package}::worker::perform"))
+            .unwrap();
+        assert!(
+            graph["links"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|edge| edge["relation"] == "calls"
+                    && edge["target"] == target["id"]
+                    && edge["source_location"] == "L1")
+        );
+        assert_eq!(graph["multigraph"], true);
+    };
+    run("cache_fixture");
+    // Simulate generated graph/cache left by an older extractor while source
+    // bytes stay unchanged; a version stamp must force project assembly again.
+    std::fs::write(output.join("extractor-version"), "old-extractor").unwrap();
+    std::fs::write(output.join("graph.json"), "{\"sentinel\":true}").unwrap();
+    run("cache_fixture");
+    run("cache_fixture");
+    // Cargo context changes while Rust files remain byte-for-byte identical.
+    std::fs::write(
+        source.join("Cargo.toml"),
+        "[package]\nname='renamed_fixture'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+    run("renamed_fixture");
+}
+
+#[test]
+fn cli_resolves_ui_engine_domain_calls_beside_a_remapped_test_module() {
+    use std::process::Command;
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let output = directory.path().join("generated");
+    let files = [
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers=['frontend','engine_zed']\nresolver='2'\n",
+        ),
+        (
+            "frontend/Cargo.toml",
+            "[package]\nname='bellatrix_ui'\nversion='0.1.0'\n[lib]\nname='ui'\n[dependencies]\nengine_zed={path='../engine_zed'}\n",
+        ),
+        (
+            "frontend/src/lib.rs",
+            "pub fn start_runtime() {\n    engine_zed::api::resolve_node_runtime();\n}\n\n#[cfg(any())]\nfn unbuilt_filename_namespace() {\n    engine_zed::api::runtime_tests::remapped_test_only();\n}\n",
+        ),
+        (
+            "engine_zed/Cargo.toml",
+            "[package]\nname='engine_zed'\nversion='0.1.0'\n",
+        ),
+        ("engine_zed/src/lib.rs", "pub mod api;\nmod domain;\n"),
+        (
+            "engine_zed/src/api/mod.rs",
+            "mod runtime;\npub use runtime::*;\n",
+        ),
+        (
+            "engine_zed/src/api/runtime.rs",
+            "use crate::domain::runtime;\npub fn resolve_node_runtime() {\n    runtime::resolve_node_options();\n}\n#[cfg(test)]\n#[path=\"runtime_tests.rs\"]\nmod tests;\n",
+        ),
+        (
+            "engine_zed/src/api/runtime_tests.rs",
+            "pub fn remapped_test_only() { super::resolve_node_runtime(); }\n",
+        ),
+        ("engine_zed/src/domain/mod.rs", "pub(crate) mod runtime;\n"),
+        (
+            "engine_zed/src/domain/runtime.rs",
+            "pub(crate) fn resolve_node_options() {}\n",
+        ),
+    ];
+    for (path, content) in files {
+        let path = source.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    let run = || {
+        let result = Command::new(env!("CARGO_BIN_EXE_graphify-rs"))
+            .arg("build")
+            .arg("--path")
+            .arg(&source)
+            .arg("--output")
+            .arg(&output)
+            .args(["--no-llm", "--code-only", "--format", "json,report"])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let graph: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(output.join("graph.json")).unwrap()).unwrap();
+        let nodes = graph["nodes"].as_array().unwrap();
+        let links = graph["links"].as_array().unwrap();
+        let node_id = |qualified: &str| {
+            &nodes
+                .iter()
+                .find(|node| node["qualified_name"] == qualified && node["has_body"] == true)
+                .unwrap_or_else(|| panic!("missing definition: {qualified}"))["id"]
+        };
+        for (from, to, location, source_suffix) in [
+            (
+                "ui::start_runtime",
+                "engine_zed::api::runtime::resolve_node_runtime",
+                "L2",
+                "frontend/src/lib.rs",
+            ),
+            (
+                "engine_zed::api::runtime::resolve_node_runtime",
+                "engine_zed::domain::runtime::resolve_node_options",
+                "L3",
+                "engine_zed/src/api/runtime.rs",
+            ),
+        ] {
+            let edge = links
+                .iter()
+                .find(|edge| {
+                    edge["relation"] == "calls"
+                        && &edge["source"] == node_id(from)
+                        && &edge["target"] == node_id(to)
+                })
+                .unwrap_or_else(|| panic!("missing call: {from} -> {to}"));
+            assert_eq!(edge["confidence"], "INFERRED");
+            assert_eq!(edge["syntax_confidence"], "EXTRACTED");
+            assert_eq!(edge["target_confidence"], "INFERRED");
+            assert_eq!(edge["confidence_scope"], "target-candidate");
+            assert_eq!(edge["source_location"], location);
+            assert_eq!(edge["direction"], "source_to_target");
+            assert!(
+                edge["source_file"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with(source_suffix)
+            );
+        }
+        let fake_filename_call = links
+            .iter()
+            .find(|edge| {
+                edge["relation"] == "calls"
+                    && edge["callee"] == "engine_zed::api::runtime_tests::remapped_test_only"
+            })
+            .expect("the call-site syntax must remain visible");
+        assert!(
+            !["lexical", "qualified-path", "import-alias"]
+                .contains(&fake_filename_call["resolution"].as_str().unwrap()),
+            "the test filename must not manufacture a namespace"
+        );
+        assert!(nodes.iter().any(|node| {
+            node["node_type"] == "file"
+                && node["source_file"]
+                    .as_str()
+                    .is_some_and(|file| file.ends_with("runtime_tests.rs"))
+                && node["module_layout"] == "quarantined-path-override"
+        }));
+        let source_files: std::collections::BTreeSet<_> = nodes
+            .iter()
+            .filter(|node| node["node_type"] == "file")
+            .filter_map(|node| node["source_file"].as_str())
+            .collect();
+        assert_eq!(source_files.len(), 7);
+        assert!(
+            source_files
+                .iter()
+                .any(|file| file.ends_with("runtime_tests.rs"))
+        );
+    };
+    run();
+    // Keep source bytes and per-file caches, but force complete graph assembly.
+    std::fs::remove_file(output.join("graph.json")).unwrap();
+    run();
 }

@@ -20,6 +20,12 @@ use tracing::trace;
 use tree_sitter::{Language, Node, Parser};
 
 pub fn try_extract(path: &Path, source: &[u8], lang: &str) -> Option<ExtractionResult> {
+    if lang == "rust" {
+        return Some(crate::rust_syntax::extract(
+            path,
+            &String::from_utf8_lossy(source),
+        ));
+    }
     let (language, config) = treesitter_config::resolve_language(lang)?;
     extract_with_treesitter(path, source, language, config, lang)
 }

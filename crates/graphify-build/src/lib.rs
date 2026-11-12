@@ -7,8 +7,6 @@ mod codegraph_merge;
 
 pub use codegraph_merge::merge_codegraph_edges;
 
-use std::collections::HashSet;
-
 use tracing::debug;
 
 use graphify_core::error::Result;
@@ -20,43 +18,68 @@ use graphify_core::model::ExtractionResult;
 /// All nodes are added first; edges that reference unknown source/target
 /// nodes are silently skipped (dangling-edge protection).
 pub fn build_from_extraction(extraction: &ExtractionResult) -> Result<KnowledgeGraph> {
-    let mut graph = KnowledgeGraph::new();
+    build(std::slice::from_ref(extraction))
+}
 
-    for node in &extraction.nodes {
+/// Merge borrowed extraction results, keeping the first node for each ID.
+///
+/// Nodes and edges are copied only into the final graph; no combined extraction
+/// is materialized. Use [`build_owned`] when the input is no longer needed.
+pub fn build(extractions: &[ExtractionResult]) -> Result<KnowledgeGraph> {
+    let mut graph = KnowledgeGraph::new();
+    for node in extractions.iter().flat_map(|result| &result.nodes) {
         let _ = graph.add_node(node.clone());
     }
+    append_edges(
+        &mut graph,
+        extractions
+            .iter()
+            .flat_map(|result| result.edges.iter().cloned()),
+    );
+    graph.set_hyperedges(
+        extractions
+            .iter()
+            .flat_map(|result| result.hyperedges.iter().cloned())
+            .collect(),
+    );
+    Ok(graph)
+}
 
-    let node_ids: HashSet<&str> = extraction.nodes.iter().map(|n| n.id.as_str()).collect();
+/// Assemble a graph by moving extraction payloads instead of cloning them.
+///
+/// All nodes are inserted before any edge, so cross-file references, duplicate
+/// node precedence, parallel edges and dangling-edge handling match [`build`].
+/// The CLI uses this path to keep large syntax metadata in a single owner.
+pub fn build_owned(extractions: Vec<ExtractionResult>) -> Result<KnowledgeGraph> {
+    let edge_count = extractions.iter().map(|result| result.edges.len()).sum();
+    let mut edges = Vec::with_capacity(edge_count);
+    let mut hyperedges = Vec::new();
+    let mut graph = KnowledgeGraph::new();
+    for result in extractions {
+        for node in result.nodes {
+            let _ = graph.add_node(node);
+        }
+        edges.extend(result.edges);
+        hyperedges.extend(result.hyperedges);
+    }
+    append_edges(&mut graph, edges);
+    graph.set_hyperedges(hyperedges);
+    Ok(graph)
+}
 
+fn append_edges(
+    graph: &mut KnowledgeGraph,
+    edges: impl IntoIterator<Item = graphify_core::model::GraphEdge>,
+) {
     let mut skipped = 0usize;
-    for edge in &extraction.edges {
-        if node_ids.contains(edge.source.as_str()) && node_ids.contains(edge.target.as_str()) {
-            let _ = graph.add_edge(edge.clone());
-        } else {
+    for edge in edges {
+        if graph.add_edge(edge).is_err() {
             skipped += 1;
         }
     }
     if skipped > 0 {
         debug!("skipped {skipped} dangling edge(s)");
     }
-
-    graph.set_hyperedges(extraction.hyperedges.clone());
-
-    Ok(graph)
-}
-
-/// Merge multiple extraction results into one graph.
-///
-/// Later extractions override earlier ones for same node IDs (first-write-wins
-/// via `add_node` which rejects duplicates, so the first occurrence is kept).
-pub fn build(extractions: &[ExtractionResult]) -> Result<KnowledgeGraph> {
-    let mut combined = ExtractionResult::default();
-    for ext in extractions {
-        combined.nodes.extend(ext.nodes.clone());
-        combined.edges.extend(ext.edges.clone());
-        combined.hyperedges.extend(ext.hyperedges.clone());
-    }
-    build_from_extraction(&combined)
 }
 
 #[cfg(test)]
@@ -174,5 +197,46 @@ mod tests {
         let graph = build_from_extraction(&ext).unwrap();
         assert_eq!(graph.hyperedges.len(), 1);
         assert_eq!(graph.hyperedges[0].relation, "coexist");
+    }
+
+    #[test]
+    fn owned_assembly_preserves_evidence_parallel_calls_and_first_node_precedence() {
+        let mut first = make_node("a");
+        first.label = "first definition".into();
+        first
+            .extra
+            .insert("qualified_name".into(), serde_json::json!("app::a"));
+        let mut duplicate = make_node("a");
+        duplicate.label = "later duplicate".into();
+        let mut call = make_edge("a", "b");
+        call.source_location = Some("L12".into());
+        call.extra
+            .insert("direction".into(), serde_json::json!("source_to_target"));
+        call.extra
+            .insert("candidate_ids".into(), serde_json::json!(["b", "c"]));
+        let mut repeated = call.clone();
+        repeated.source_location = Some("L13".into());
+        let extractions = vec![
+            ExtractionResult {
+                nodes: vec![first],
+                edges: vec![call, repeated, make_edge("a", "missing")],
+                hyperedges: vec![Hyperedge {
+                    nodes: vec!["a".into(), "b".into()],
+                    relation: "group".into(),
+                    label: "evidence".into(),
+                }],
+            },
+            ExtractionResult {
+                nodes: vec![duplicate, make_node("b")],
+                edges: vec![make_edge("b", "a")],
+                hyperedges: vec![],
+            },
+        ];
+        let borrowed = build(&extractions).unwrap().to_node_link_json();
+        let owned = build_owned(extractions).unwrap();
+        assert_eq!(owned.to_node_link_json(), borrowed);
+        assert_eq!(owned.node_count(), 2);
+        assert_eq!(owned.edge_count(), 3);
+        assert_eq!(owned.get_node("a").unwrap().label, "first definition");
     }
 }
