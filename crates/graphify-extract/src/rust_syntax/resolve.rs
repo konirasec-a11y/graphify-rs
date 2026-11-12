@@ -81,6 +81,7 @@ fn call_position(edge: &graphify_core::model::GraphEdge) -> Option<(u64, u64)> {
 /// Resolve Rust calls over the complete project extraction. Safe to repeat after
 /// per-file cached extraction: each edge retains its original unresolved target.
 pub(super) fn resolve(result: &mut ExtractionResult) {
+    super::path_overrides::apply(result);
     let index = Index::new(result);
     for edge in &mut result.edges {
         if edge.extra.get("language").and_then(Value::as_str) != Some("rust") {
@@ -89,11 +90,18 @@ pub(super) fn resolve(result: &mut ExtractionResult) {
         if !matches!(edge.relation.as_str(), "calls" | "imports") {
             continue;
         }
-        let unsupported_layout = index.nodes.get(&edge.source).is_some_and(|node| {
-            index
-                .unsupported_layouts
-                .contains(text(node, "package_name"))
-        });
+        if edge.relation == "calls" {
+            edge.extra
+                .insert("syntax_confidence".into(), json!("EXTRACTED"));
+            edge.extra
+                .insert("target_confidence".into(), json!("UNRESOLVED"));
+            edge.extra
+                .insert("confidence_scope".into(), json!("observed-callsite"));
+        }
+        let unsupported_layout = index
+            .nodes
+            .get(&edge.source)
+            .is_some_and(|node| text(node, "module_layout") == "quarantined-path-override");
         if unsupported_layout
             || edge.extra.get("resolution_disabled") == Some(&Value::Bool(true))
             || index.nodes.get(&edge.source).is_some_and(|node| {
@@ -102,6 +110,7 @@ pub(super) fn resolve(result: &mut ExtractionResult) {
         {
             edge.extra.remove("candidate_ids");
             edge.extra.remove("resolution_truncated");
+            edge.extra.remove("resolution_ambiguity");
             if let Some(original) = edge.extra.get("unresolved_target").and_then(Value::as_str) {
                 edge.target = original.to_owned();
             }
@@ -251,6 +260,10 @@ pub(super) fn resolve(result: &mut ExtractionResult) {
             edge.confidence_score = Confidence::Ambiguous.default_score();
             edge.extra.insert("resolution".into(), json!("ambiguous"));
             edge.extra
+                .insert("target_confidence".into(), json!("AMBIGUOUS"));
+            edge.extra
+                .insert("confidence_scope".into(), json!("target-candidate"));
+            edge.extra
                 .insert("candidate_ids".into(), json!(resolution.ids));
             if resolution.truncated {
                 edge.extra
@@ -266,6 +279,10 @@ pub(super) fn resolve(result: &mut ExtractionResult) {
             edge.target = target;
             edge.confidence = Confidence::Inferred;
             edge.confidence_score = 0.9;
+            edge.extra
+                .insert("target_confidence".into(), json!("INFERRED"));
+            edge.extra
+                .insert("confidence_scope".into(), json!("target-candidate"));
             edge.extra.insert(
                 "resolution".into(),
                 json!(if resolution.alias {

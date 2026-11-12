@@ -316,6 +316,7 @@ impl Collector {
         let shadowed = self.shadowed(first);
         let mut metadata = extras(
             json!({"callee":callee,"call_kind":call_kind,"module_path":module,
+            "syntax_confidence":"EXTRACTED","target_confidence":"UNRESOLVED","confidence_scope":"observed-callsite",
             "crate_name":self.context.crate_name,"package_name":self.context.package_name,"resolution_disabled":self.context.resolution_disabled,"lexical_scope":lexical,"shadowed":shadowed,
             "crate_aliases":self.context.aliases,"unresolved_target":id,"resolution":match call_kind {
                 "method"=>"method-unresolved","macro"=>"macro-unexpanded",_=>"unresolved"}}),

@@ -33,7 +33,6 @@ pub(super) struct Index {
     pub(super) crates: BTreeSet<String>,
     pub(super) nodes: BTreeMap<String, GraphNode>,
     packages: BTreeMap<String, BTreeSet<String>>,
-    pub(super) unsupported_layouts: BTreeSet<String>,
 }
 
 impl Index {
@@ -44,19 +43,11 @@ impl Index {
             crates: BTreeSet::new(),
             nodes: BTreeMap::new(),
             packages: BTreeMap::new(),
-            unsupported_layouts: result
-                .nodes
-                .iter()
-                .filter(|node| is_rust(node) && node.extra.contains_key("module_path_override"))
-                .map(|node| text(node, "package_name").to_owned())
-                .collect(),
         };
         for node in result.nodes.iter().filter(|node| is_rust(node)) {
             index.nodes.insert(node.id.clone(), node.clone());
             if node.extra.get("resolution_disabled") == Some(&Value::Bool(true))
-                || index
-                    .unsupported_layouts
-                    .contains(text(node, "package_name"))
+                || text(node, "module_layout") == "quarantined-path-override"
             {
                 continue;
             }

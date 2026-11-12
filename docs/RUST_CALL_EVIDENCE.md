@@ -26,11 +26,21 @@ Call-target placeholders carry `unresolved: true`, `item_kind: "call_target"` an
 `has_body: false`; consumers must not count them as real function definitions.
 Syntax errors remain visible as `extraction_error` metadata on their file node.
 
+Confidence has an explicit scope. Every observed Rust call carries
+`syntax_confidence: "EXTRACTED"`. An unresolved call edge points to its placeholder
+and has `confidence_scope: "observed-callsite"`, edge confidence `EXTRACTED` and
+`target_confidence: "UNRESOLVED"`: this confirms syntax only. A unique source
+candidate instead has edge confidence and `target_confidence: "INFERRED"` with
+`confidence_scope: "target-candidate"`. Competing candidates have `AMBIGUOUS`
+target confidence. None of these values proves compiler dispatch or execution.
+
 Cargo package/lib names and conventional source-layout modules provide namespace
 context. Macro-expanded code, `#[path]` module remapping, custom code generation,
 conditional compilation and type aliases are not compiler-resolved. A package
-with `#[path]` module remapping conservatively retains unresolved calls rather
-than asserting filename-derived targets. Binary sources beside a package library
+with `#[path]` module remapping quarantines only the declared module namespace
+and its physical source tree rather than asserting filename-derived targets.
+Unrelated production modules remain eligible for resolution, including when a
+remapped module is guarded by `#[cfg(test)]`. Binary sources beside a package library
 retain unresolved targets until their separate Cargo target is modeled; distinct
 packages sharing a library name are treated as ambiguous. Use compiler
 or rust-analyzer tooling when those cases require exact target resolution.

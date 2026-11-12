@@ -4,6 +4,7 @@
 //! method dispatch, macro expansion and cfg selection are deliberately unresolved.
 mod extract;
 mod layout;
+mod path_overrides;
 mod resolve;
 #[cfg(test)]
 mod tests;

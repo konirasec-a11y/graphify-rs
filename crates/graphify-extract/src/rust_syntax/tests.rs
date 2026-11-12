@@ -192,6 +192,14 @@ fn run(target: fn()) { let text = "get(); target()"; receiver.get(); target(); p
             .any(|e| e.extra["resolution"] == "method-unresolved")
     );
     assert!(calls.iter().any(|e| e.extra["call_kind"] == "macro"));
+    assert!(
+        calls
+            .iter()
+            .all(|edge| edge.confidence == Confidence::Extracted
+                && edge.extra["syntax_confidence"] == "EXTRACTED"
+                && edge.extra["target_confidence"] == "UNRESOLVED"
+                && edge.extra["confidence_scope"] == "observed-callsite")
+    );
 }
 
 #[test]
